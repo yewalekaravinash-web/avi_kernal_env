@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openenv-data-cleaner-env"
+version = "0.1.0"
+description = "Structured Data Extraction & Cleaning Environment for OpenEnv"
+requires-python = ">=3.10"
+dependencies = [
+    "openenv-core[core]>=0.2.2",
+    "openai>=1.0.0",
+    "pandas>=2.0.0",
+    "pydantic>=2.0.0",
+    "rapidfuzz>=3.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0", "pytest-cov>=4.0.0"]
+
+# ── Entry points (server console script) ─────────────────────────────────────
+# Points to the correct module path after PYTHONPATH=/app is set.
+# Previously broken: pointed to avi_kernal_env.server.app:main (ghost module).
+[project.scripts]
+server = "server.app:main"
+
+# ── Package discovery ─────────────────────────────────────────────────────────
+# Use automatic discovery — avoids stale manual lists that caused the old
+# egg-info / pyproject name mismatch that hung docker build.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["server*"]
+exclude = ["*.egg-info*", "__pycache__*", "tests*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.yaml", "*.md"]

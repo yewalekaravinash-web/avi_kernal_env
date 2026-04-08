@@ -1,0 +1,35 @@
+# ── Build artifacts / package manager locks ────────────────────────────────
+uv.lock
+*.egg-info/
+*.egg-info
+**/*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Python runtime artifacts ───────────────────────────────────────────────
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+
+# ── Dev / CI artefacts ─────────────────────────────────────────────────────
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ── IDE / OS artefacts ────────────────────────────────────────────────────
+.git/
+.gitignore
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# ── Docs / scripts not needed at runtime ─────────────────────────────────
+validate-submission.sh
+inference.py
