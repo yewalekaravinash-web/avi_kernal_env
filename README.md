@@ -468,7 +468,7 @@ python inference.py
 Or use the pipeline scripts:
 ```bash
 ./run_rl_pipeline.sh    # Bash/Linux
-./run_rl_pipeline.ps1   # Windows PowerShell
+
 ```
 
 ---
@@ -508,7 +508,7 @@ The pipeline has successfully completed its second run! Here are the real-time r
 Performance Graph
 The following summarizes the training performance after 3 full cycles across all 10 tasks.
 
-text
+
 RL TRAINING PERFORMANCE SUMMARY (Second Run)
 ======================================================================
 TASK                                SCORE    PROGRESSION
