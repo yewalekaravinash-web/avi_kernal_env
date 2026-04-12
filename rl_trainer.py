@@ -83,6 +83,14 @@ MODEL_NAME   = os.getenv("MODEL_NAME",   "Qwen/Qwen2.5-72B-Instruct")
 TEMPERATURE  = float(os.getenv("RL_TEMPERATURE", "0.2"))
 MAX_TOKENS   = int(os.getenv("RL_MAX_TOKENS",    "1024"))
 
+# ANSI Colors for premium console output
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
+CYAN = "\033[96m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Training Configuration
@@ -579,19 +587,19 @@ class RLTrainer:
         self._log("=" * 70)
         self._log("RL TRAINING LOOP STARTED")
         self._log(f"Tasks: {self.num_tasks} | Cycles: {self.config.num_cycles} | "
-                  f"γ={self.config.gamma} | baseline_lr={self.config.baseline_lr}")
+                  f"gamma={self.config.gamma} | baseline_lr={self.config.baseline_lr}")
         self._log("=" * 70)
 
         best_global   = 0.0
         patience_left = self.config.early_stop_patience
 
         for cycle in range(1, self.config.num_cycles + 1):
-            self._log(f"\n{'─'*60}")
+            self._log(f"\n{'-'*60}")
             self._log(f"CYCLE {cycle}/{self.config.num_cycles} | "
                       f"Policy v{self.policy.weight_version} | "
                       f"LR={self.policy.learning_rate:.4f} | "
                       f"Baseline={self.policy.reward_baseline:.4f}")
-            self._log(f"{'─'*60}")
+            self._log(f"{'-'*60}")
 
             cycle_scores = []
 
@@ -616,7 +624,7 @@ class RLTrainer:
                 "lr":          round(self.policy.learning_rate, 4),
             })
 
-            self._log(f"\n  ► Cycle {cycle} avg={cycle_avg:.4f} | "
+            self._log(f"\n  > Cycle {cycle} avg={cycle_avg:.4f} | "
                       f"Global best={best_global:.4f} | "
                       f"Patience={patience_left}")
 
@@ -624,10 +632,10 @@ class RLTrainer:
             if cycle_avg > best_global + self.config.min_improvement:
                 best_global   = cycle_avg
                 patience_left = self.config.early_stop_patience
-                self._log(f"  ► NEW BEST: {best_global:.4f} (patience reset)")
+                self._log(f"  > NEW BEST: {best_global:.4f} (patience reset)")
             else:
                 patience_left -= 1
-                self._log(f"  ► No improvement. Patience={patience_left}")
+                self._log(f"  > No improvement. Patience={patience_left}")
                 if patience_left <= 0:
                     self._log(f"\n[EARLY STOP] No improvement for "
                               f"{self.config.early_stop_patience} cycles. Stopping.")
@@ -756,32 +764,41 @@ class RLTrainer:
     ) -> Dict[str, Any]:
         """
         Call LLM with current policy weights (system prompt + few-shot).
-        Returns parsed payload dict. Never raises.
+        Implements exponential backoff for robustness against rate limits.
         """
-        try:
-            resp = self.llm.chat.completions.create(
-                model=MODEL_NAME,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user",   "content": user_content},
-                ],
-                temperature=TEMPERATURE,
-                max_tokens=MAX_TOKENS,
-            )
-            text = (resp.choices[0].message.content or "").strip()
+        max_retries = 3
+        backoff_base = 2.0
 
-            # Strip markdown fences
-            if text.startswith("```"):
-                lines = text.split("\n")
-                text  = "\n".join(l for l in lines if not l.strip().startswith("```")).strip()
+        for attempt in range(max_retries):
+            try:
+                resp = self.llm.chat.completions.create(
+                    model=MODEL_NAME,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user",   "content": user_content},
+                    ],
+                    temperature=TEMPERATURE,
+                    max_tokens=MAX_TOKENS,
+                )
+                text = (resp.choices[0].message.content or "").strip()
 
-            parsed  = json.loads(text)
-            payload = parsed.get("payload", parsed)
-            return payload if isinstance(payload, (dict, list)) else {}
+                # Strip markdown fences
+                if text.startswith("```"):
+                    lines = text.split("\n")
+                    text  = "\n".join(l for l in lines if not l.strip().startswith("```")).strip()
 
-        except Exception as exc:
-            print(f"[RL-DEBUG] LLM call error task={task_id}: {exc}", flush=True)
-            return {}
+                parsed  = json.loads(text)
+                payload = parsed.get("payload", parsed)
+                return payload if isinstance(payload, (dict, list)) else {}
+
+            except Exception as exc:
+                wait_time = backoff_base ** attempt
+                print(f"[RL-RETRY] LLM error task={task_id} (attempt {attempt+1}/{max_retries}): {exc}. Waiting {wait_time}s...", flush=True)
+                if attempt < max_retries - 1:
+                    time.sleep(wait_time)
+                else:
+                    return {}
+        return {}
 
     # ── Action builder ────────────────────────────────────────────────────────
 
@@ -866,17 +883,26 @@ class _MockEnvClient:
 
 
 if __name__ == "__main__":
-    print("Running RL Trainer in MOCK mode (no live server required).")
     import sys
+    import os
+
+    server_url = os.getenv("OPENENV_SERVER_URL")
+    hf_token   = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+
+    if not hf_token:
+        print(f"{RED}Error: HF_TOKEN is not set. RL training requires an API key.{RESET}")
+        sys.exit(1)
+
+    print(f"{BOLD}{CYAN}RL Trainer starting...{RESET}")
+    print(f"Model: {MODEL_NAME} | Server: {server_url or 'MOCK MODE'}")
 
     try:
         from openai import OpenAI
-        api_key  = os.getenv("HF_TOKEN") or os.getenv("API_KEY", "dummy")
-        api_url  = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-        llm      = OpenAI(base_url=api_url, api_key=api_key)
+        api_url = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+        llm     = OpenAI(base_url=api_url, api_key=hf_token)
     except ImportError:
-        print("[WARN] openai not installed; using None for llm_client (mock only).")
-        llm = None  # type: ignore
+        print("[WARN] openai not installed; using None for llm_client.")
+        llm = None
 
     config = TrainingConfig(
         num_episodes   = 10,
@@ -887,17 +913,44 @@ if __name__ == "__main__":
         log_file       = "rl_training.log",
     )
 
-    mock_env = _MockEnvClient()
-    trainer  = RLTrainer(
+    if server_url:
+        import asyncio
+        from client import DataCleanerEnvClient
+        print(f"Connecting to live server at {server_url}...")
+        try:
+            class SyncEnvClient:
+                def __init__(self, url):
+                    self.url = url
+                    self.loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(self.loop)
+                    self.client = DataCleanerEnvClient(base_url=url)
+                def reset(self):
+                    return self.loop.run_until_complete(self.client.reset())
+                def step(self, action):
+                    return self.loop.run_until_complete(self.client.step(action))
+
+            env_client = SyncEnvClient(server_url)
+        except Exception as e:
+            print(f"{RED}Failed to initialize live client: {e}. Falling back to mock.{RESET}")
+            env_client = _MockEnvClient()
+    else:
+        print("Running in MOCK mode (no server URL provided).")
+        env_client = _MockEnvClient()
+
+    trainer = RLTrainer(
         llm_client = llm,
-        env_client = mock_env,
+        env_client = env_client,
         config     = config,
         num_tasks  = 10,
     )
+    
     results = trainer.run()
-    print("\nFinal Policy Summary:")
-    print(json.dumps(results["policy_summary"], indent=2))
-    print(f"\nCycle logs ({len(results['cycle_logs'])} cycles):")
-    for log in results["cycle_logs"]:
-        print(f"  Cycle {log['cycle']}: avg={log['avg_score']:.4f} | "
-              f"policy_v={log['policy_version']}")
+    
+    print("\n" + "="*70)
+    print(f"{BOLD}{GREEN}TRAINING CYCLE COMPLETE{RESET}")
+    print("="*70)
+    summary = results["policy_summary"]
+    print(f"Final Version  : v{summary['weight_version']}")
+    print(f"Global Avg     : {summary['global_avg']:.4f}")
+    print(f"Baseline Reward: {summary['reward_baseline']:.4f}")
+    print("="*70)

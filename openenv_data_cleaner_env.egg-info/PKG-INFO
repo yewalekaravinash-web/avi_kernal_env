@@ -1,0 +1,15 @@
+Metadata-Version: 2.4
+Name: openenv-data-cleaner-env
+Version: 0.1.0
+Summary: Structured Data Extraction & Cleaning Environment for OpenEnv
+Requires-Python: >=3.10
+Requires-Dist: openenv-core[core]>=0.2.2
+Requires-Dist: openai>=1.0.0
+Requires-Dist: pandas>=2.0.0
+Requires-Dist: pydantic>=2.0.0
+Requires-Dist: prometheus-client>=0.16.0
+Requires-Dist: rapidfuzz>=3.0.0
+Requires-Dist: httpx>=0.25.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0.0; extra == "dev"
+Requires-Dist: pytest-cov>=4.0.0; extra == "dev"
