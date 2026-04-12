@@ -6,8 +6,32 @@ Task 2 (Medium): Duplicate detection & merge on a 20-record CSV-like list.
 Task 3 (Hard)  : Multi-source reconciliation with conflict resolution policy.
 
 All graders are fully deterministic — no LLM-as-judge.
+
+Score contract (OpenEnv requirement):
+  Scores MUST be strictly inside the open interval (0, 1).
+  Exactly 0.0 and exactly 1.0 are both rejected by the validator.
+  _clamp() is applied to every raw score before it is returned.
 """
 from typing import Any, Dict, List, Tuple
+
+from rapidfuzz.fuzz import WRatio as _fuzz_ratio  # P0-2: case-insensitive, substring-aware
+
+# ---------------------------------------------------------------------------
+# Shared clamp — enforces closed interval [0.01, 0.99] on every score
+# ---------------------------------------------------------------------------
+# Requirement: scores must be strictly > 0 and < 1, expressed to 2 decimal
+# places.  The smallest representable value is therefore 0.01 and the largest
+# is 0.99.  Using 1e-4 (0.0001) as the floor would round to 0.00 at 2dp,
+# which the validator treats as exactly 0 and rejects.
+_EPS: float = 0.01          # 0.01 — minimum valid score at 2 decimal places
+
+def _clamp(score: float) -> float:
+    """Clamp to [_EPS, 1 - _EPS] = [0.01, 0.99], rounded to 2 decimal places.
+
+    Guarantees every returned score satisfies the OpenEnv contract:
+        0.01 <= score <= 0.99  (strictly > 0 and < 1 at 2dp precision)
+    """
+    return round(max(_EPS, min(float(score), 1.0 - _EPS)), 2)
 
 
 # ---------------------------------------------------------------------------
@@ -52,31 +76,40 @@ TASK1_GOLD = {
 
 
 def grade_task1(payload: Dict[str, Any]) -> Tuple[float, str]:
-    """Field-level match score, averaged across 9 fields."""
+    """Field-level match score averaged across 9 fields, clamped to (0, 1)."""
     gold = TASK1_GOLD
     fields = list(gold.keys())
     correct = 0
     feedback_parts = []
+
     for f in fields:
         agent_val = payload.get(f)
-        gold_val = gold[f]
-        # Normalize comparison
+        gold_val  = gold[f]
+        schema_type = TASK1_SCHEMA.get(f, "str")
         try:
             if isinstance(gold_val, float):
                 match = abs(float(agent_val) - gold_val) < 0.001
             elif isinstance(gold_val, int):
                 match = int(agent_val) == gold_val
+            elif "lowercase" in schema_type:
+                # P0-1: normalize with .strip().lower() for 'str (lowercase)' fields
+                match = str(agent_val).strip().lower() == str(gold_val).strip().lower()
             else:
                 match = str(agent_val).strip() == str(gold_val).strip()
         except Exception:
             match = False
+
         if match:
             correct += 1
             feedback_parts.append(f"✓ {f}")
         else:
             feedback_parts.append(f"✗ {f} (got {agent_val!r}, expected {gold_val!r})")
-    score = round(correct / len(fields), 4)
-    feedback = f"Task1 score={score:.2f} [{correct}/{len(fields)} fields correct]\n" + "\n".join(feedback_parts)
+
+    score = _clamp(correct / len(fields))
+    feedback = (
+        f"Task1 score={score:.2f} [{correct}/{len(fields)} fields correct]\n"
+        + "\n".join(feedback_parts)
+    )
     return score, feedback
 
 
@@ -85,34 +118,32 @@ def grade_task1(payload: Dict[str, Any]) -> Tuple[float, str]:
 # ---------------------------------------------------------------------------
 
 TASK2_RECORDS = [
-    {"id": 1,  "company": "Acme Corp",        "address": "123 Main St, Boston, MA 02101", "phone": "617-555-0101", "email": "info@acme.com"},
-    {"id": 2,  "company": "ACME Corporation", "address": "123 Main Street, Boston MA",    "phone": "6175550101",  "email": "info@acme.com"},
-    {"id": 3,  "company": "Acme Corp.",        "address": "123 Main St Boston MA 02101",  "phone": "(617)555-0101","email": "contact@acme.com"},
-    {"id": 4,  "company": "Beta LLC",          "address": "45 Oak Ave, Chicago, IL 60601", "phone": "312-555-0202","email": "hello@beta.io"},
-    {"id": 5,  "company": "Beta, LLC",         "address": "45 Oak Avenue Chicago IL",      "phone": "3125550202",  "email": "hello@beta.io"},
-    {"id": 6,  "company": "Gamma Inc",         "address": "7 Pine Rd, Seattle, WA 98101", "phone": "206-555-0303","email": "support@gamma.com"},
-    {"id": 7,  "company": "GammaInc",          "address": "7 Pine Road Seattle WA",        "phone": "2065550303",  "email": "support@gamma.com"},
-    {"id": 8,  "company": "Delta Partners",    "address": "99 River Blvd, Austin TX 78701","phone": "512-555-0404","email": "dp@delta.com"},
-    {"id": 9,  "company": "Delta Partners LLC","address": "99 River Blvd Austin, TX",      "phone": "5125550404",  "email": "dp@delta.com"},
-    {"id": 10, "company": "Epsilon Co",        "address": "200 Lake Dr, Miami FL 33101",   "phone": "305-555-0505","email": "info@epsilon.net"},
+    {"id": 1,  "company": "Acme Corp",         "address": "123 Main St, Boston, MA 02101",  "phone": "617-555-0101",  "email": "info@acme.com"},
+    {"id": 2,  "company": "ACME Corporation",  "address": "123 Main Street, Boston MA",      "phone": "6175550101",    "email": "info@acme.com"},
+    {"id": 3,  "company": "Acme Corp.",         "address": "123 Main St Boston MA 02101",    "phone": "(617)555-0101", "email": "contact@acme.com"},
+    {"id": 4,  "company": "Beta LLC",           "address": "45 Oak Ave, Chicago, IL 60601",  "phone": "312-555-0202",  "email": "hello@beta.io"},
+    {"id": 5,  "company": "Beta, LLC",          "address": "45 Oak Avenue Chicago IL",        "phone": "3125550202",    "email": "hello@beta.io"},
+    {"id": 6,  "company": "Gamma Inc",          "address": "7 Pine Rd, Seattle, WA 98101",   "phone": "206-555-0303",  "email": "support@gamma.com"},
+    {"id": 7,  "company": "GammaInc",           "address": "7 Pine Road Seattle WA",          "phone": "2065550303",    "email": "support@gamma.com"},
+    {"id": 8,  "company": "Delta Partners",     "address": "99 River Blvd, Austin TX 78701", "phone": "512-555-0404",  "email": "dp@delta.com"},
+    {"id": 9,  "company": "Delta Partners LLC", "address": "99 River Blvd Austin, TX",        "phone": "5125550404",    "email": "dp@delta.com"},
+    {"id": 10, "company": "Epsilon Co",         "address": "200 Lake Dr, Miami FL 33101",    "phone": "305-555-0505",  "email": "info@epsilon.net"},
 ]
 
-# Ground truth duplicate clusters (sets of ids)
 TASK2_GOLD_CLUSTERS = [
-    {1, 2, 3},   # Acme
-    {4, 5},      # Beta
-    {6, 7},      # Gamma
-    {8, 9},      # Delta
-    {10},        # Epsilon — singleton
+    {1, 2, 3},
+    {4, 5},
+    {6, 7},
+    {8, 9},
+    {10},
 ]
 
-# Gold merged records (canonical)
 TASK2_GOLD_MERGED = [
-    {"company": "Acme Corp",     "address": "123 Main St, Boston, MA 02101", "phone": "617-555-0101", "email": "info@acme.com"},
-    {"company": "Beta LLC",      "address": "45 Oak Ave, Chicago, IL 60601", "phone": "312-555-0202", "email": "hello@beta.io"},
-    {"company": "Gamma Inc",     "address": "7 Pine Rd, Seattle, WA 98101", "phone": "206-555-0303", "email": "support@gamma.com"},
-    {"company": "Delta Partners","address": "99 River Blvd, Austin TX 78701","phone": "512-555-0404","email": "dp@delta.com"},
-    {"company": "Epsilon Co",    "address": "200 Lake Dr, Miami FL 33101",   "phone": "305-555-0505","email": "info@epsilon.net"},
+    {"company": "Acme Corp",      "address": "123 Main St, Boston, MA 02101",  "phone": "617-555-0101", "email": "info@acme.com"},
+    {"company": "Beta LLC",       "address": "45 Oak Ave, Chicago, IL 60601",  "phone": "312-555-0202", "email": "hello@beta.io"},
+    {"company": "Gamma Inc",      "address": "7 Pine Rd, Seattle, WA 98101",   "phone": "206-555-0303", "email": "support@gamma.com"},
+    {"company": "Delta Partners", "address": "99 River Blvd, Austin TX 78701", "phone": "512-555-0404", "email": "dp@delta.com"},
+    {"company": "Epsilon Co",     "address": "200 Lake Dr, Miami FL 33101",    "phone": "305-555-0505", "email": "info@epsilon.net"},
 ]
 
 
@@ -120,61 +151,54 @@ def _normalize_phone(p: str) -> str:
     return "".join(c for c in p if c.isdigit())
 
 
+# P0-2: _company_sim removed — now uses rapidfuzz.fuzz.token_sort_ratio (threshold >= 85)
+_COMPANY_MATCH_THRESHOLD: float = 85.0
+
+
 def grade_task2(payload: Dict[str, Any]) -> Tuple[float, str]:
     """
+    Cluster score (exact set match) + merge score (field match), clamped to (0, 1).
     Expected payload keys:
       clusters: list of lists of record ids  e.g. [[1,2,3],[4,5],...]
       merged:   list of canonical dicts      e.g. [{"company":...},...]
     """
     clusters_agent = payload.get("clusters", [])
-    merged_agent = payload.get("merged", [])
+    merged_agent   = payload.get("merged",   [])
 
-    # --- Cluster score (precision/recall via exact set match) ---
-    gold_sets = [frozenset(c) for c in TASK2_GOLD_CLUSTERS]
+    gold_sets  = [frozenset(c) for c in TASK2_GOLD_CLUSTERS]
     agent_sets = [frozenset(c) for c in clusters_agent]
-
-    cluster_hits = sum(1 for gs in gold_sets if gs in agent_sets)
+    cluster_hits  = sum(1 for gs in gold_sets if gs in agent_sets)
     cluster_score = cluster_hits / len(gold_sets)
 
-    # --- Merge score: per-field match for matched clusters ---
-    merge_hits = 0
-    merge_total = len(TASK2_GOLD_MERGED) * 4  # 4 fields each
+    merge_hits  = 0
+    merge_total = len(TASK2_GOLD_MERGED) * 4   # 4 fields per record
     for gm in TASK2_GOLD_MERGED:
-        # Find best match in agent merged list by company name similarity
-        best = None
-        best_sim = 0.0
+        best, best_sim = None, 0.0
         for am in merged_agent:
-            s = _company_sim(str(am.get("company", "")), gm["company"])
+            s = _fuzz_ratio(
+                str(am.get("company", "")).strip().lower(),
+                gm["company"].strip().lower(),
+            )
             if s > best_sim:
-                best_sim = s
-                best = am
-        if best and best_sim > 0.5:
+                best_sim, best = s, am
+        if best and best_sim >= _COMPANY_MATCH_THRESHOLD:
             for f in ["address", "email"]:
                 if str(best.get(f, "")).strip().lower() == gm[f].strip().lower():
                     merge_hits += 1
             if _normalize_phone(str(best.get("phone", ""))) == _normalize_phone(gm["phone"]):
                 merge_hits += 1
-            # company name partial credit
-            if best_sim > 0.8:
+            # name similarity bonus — awarded when fuzzy match clears threshold
+            if best_sim >= _COMPANY_MATCH_THRESHOLD:
                 merge_hits += 1
 
     merge_score = merge_hits / merge_total if merge_total else 0.0
-    score = round(0.5 * cluster_score + 0.5 * merge_score, 4)
+    score = _clamp(0.5 * cluster_score + 0.5 * merge_score)
     feedback = (
-        f"Task2 score={score:.2f} | cluster_score={cluster_score:.2f} "
-        f"[{cluster_hits}/{len(gold_sets)}] | merge_score={merge_score:.2f} "
+        f"Task2 score={score:.2f} | cluster={cluster_score:.2f} "
+        f"[{cluster_hits}/{len(gold_sets)}] | merge={merge_score:.2f} "
         f"[{merge_hits}/{merge_total} field-matches]"
     )
     return score, feedback
-
-
-def _company_sim(a: str, b: str) -> float:
-    """Simple token overlap similarity."""
-    ta = set(a.lower().replace(",", "").replace(".", "").split())
-    tb = set(b.lower().replace(",", "").replace(".", "").split())
-    if not ta or not tb:
-        return 0.0
-    return len(ta & tb) / len(ta | tb)
 
 
 # ---------------------------------------------------------------------------
@@ -183,19 +207,19 @@ def _company_sim(a: str, b: str) -> float:
 
 TASK3_SOURCES = {
     "crm": [
-        {"entity_id": "E001", "name": "Alpha Solutions", "phone": "212-555-1001", "email": "sales@alpha.com",  "tier": "gold",   "revenue": 500000},
-        {"entity_id": "E002", "name": "BetaTech",        "phone": "415-555-2002", "email": "info@betatech.io","tier": "silver", "revenue": 120000},
-        {"entity_id": "E003", "name": "Gamma Global",    "phone": "312-555-3003", "email": None,              "tier": "bronze", "revenue": 45000},
+        {"entity_id": "E001", "name": "Alpha Solutions", "phone": "212-555-1001", "email": "sales@alpha.com",   "tier": "gold",   "revenue": 500000},
+        {"entity_id": "E002", "name": "BetaTech",        "phone": "415-555-2002", "email": "info@betatech.io",  "tier": "silver", "revenue": 120000},
+        {"entity_id": "E003", "name": "Gamma Global",    "phone": "312-555-3003", "email": None,                "tier": "bronze", "revenue": 45000},
     ],
     "billing": [
         {"entity_id": "E001", "name": "Alpha Solutions Ltd", "phone": "212-555-1001", "email": "billing@alpha.com", "tier": None,     "revenue": 512000},
-        {"entity_id": "E002", "name": "BetaTech Inc",        "phone": "415-555-9999", "email": "info@betatech.io", "tier": "gold",   "revenue": 125000},
-        {"entity_id": "E003", "name": "Gamma Global",        "phone": "312-555-3003", "email": "admin@gamma.com",  "tier": "bronze", "revenue": 46000},
+        {"entity_id": "E002", "name": "BetaTech Inc",        "phone": "415-555-9999", "email": "info@betatech.io",  "tier": "gold",   "revenue": 125000},
+        {"entity_id": "E003", "name": "Gamma Global",        "phone": "312-555-3003", "email": "admin@gamma.com",   "tier": "bronze", "revenue": 46000},
     ],
     "marketing": [
-        {"entity_id": "E001", "name": "Alpha Solutions", "phone": None,           "email": "marketing@alpha.com", "tier": "gold",   "revenue": None},
-        {"entity_id": "E002", "name": "BetaTech",        "phone": "415-555-2002", "email": "info@betatech.io",   "tier": "silver", "revenue": 119000},
-        {"entity_id": "E003", "name": "Gamma Global",    "phone": None,           "email": "admin@gamma.com",    "tier": "silver", "revenue": 44000},
+        {"entity_id": "E001", "name": "Alpha Solutions", "phone": None,           "email": "marketing@alpha.com",  "tier": "gold",   "revenue": None},
+        {"entity_id": "E002", "name": "BetaTech",        "phone": "415-555-2002", "email": "info@betatech.io",     "tier": "silver", "revenue": 119000},
+        {"entity_id": "E003", "name": "Gamma Global",    "phone": None,           "email": "admin@gamma.com",      "tier": "silver", "revenue": 44000},
     ],
 }
 
@@ -203,34 +227,34 @@ TASK3_POLICY = """
 Source priority policy (apply field-by-field):
   name:    crm > billing > marketing (prefer shorter, cleaner name)
   phone:   crm > marketing > billing (billing phone for E002 is known bad)
-  email:   crm has sales email; billing has billing email; use crm unless null → then billing → then marketing
+  email:   crm unless null → then billing → then marketing
   tier:    crm > marketing > billing  (crm is authoritative for tier)
   revenue: billing > crm > marketing  (billing has latest invoice data)
   rule:    Never set a field to null if a non-null value exists in any source.
 """
 
 TASK3_GOLD = [
-    {"entity_id": "E001", "name": "Alpha Solutions",  "phone": "212-555-1001", "email": "sales@alpha.com",  "tier": "gold",   "revenue": 512000},
-    {"entity_id": "E002", "name": "BetaTech",         "phone": "415-555-2002", "email": "info@betatech.io", "tier": "silver", "revenue": 125000},
-    {"entity_id": "E003", "name": "Gamma Global",     "phone": "312-555-3003", "email": "admin@gamma.com",  "tier": "bronze", "revenue": 46000},
+    {"entity_id": "E001", "name": "Alpha Solutions", "phone": "212-555-1001", "email": "sales@alpha.com",  "tier": "gold",   "revenue": 512000},
+    {"entity_id": "E002", "name": "BetaTech",        "phone": "415-555-2002", "email": "info@betatech.io", "tier": "silver", "revenue": 125000},
+    {"entity_id": "E003", "name": "Gamma Global",    "phone": "312-555-3003", "email": "admin@gamma.com",  "tier": "bronze", "revenue": 46000},
 ]
 
 
 def grade_task3(payload: Dict[str, Any]) -> Tuple[float, str]:
     """
-    Expected payload: {"records": [{"entity_id":..., "name":..., ...}, ...]}
-    Grader checks field accuracy vs gold and penalizes null-when-value-exists.
+    Field accuracy minus null penalties, clamped to (0, 1).
+    Expected payload: {"records": [{"entity_id":..., ...}, ...]}
     """
-    records = payload.get("records", [])
+    records  = payload.get("records", [])
     gold_map = {r["entity_id"]: r for r in TASK3_GOLD}
-    fields = ["name", "phone", "email", "tier", "revenue"]
-    total = len(TASK3_GOLD) * len(fields)
-    correct = 0
+    fields   = ["name", "phone", "email", "tier", "revenue"]
+    total    = len(TASK3_GOLD) * len(fields)
+    correct  = 0
     penalties = 0
     feedback_parts = []
 
     for agent_rec in records:
-        eid = agent_rec.get("entity_id")
+        eid      = agent_rec.get("entity_id")
         gold_rec = gold_map.get(eid)
         if not gold_rec:
             continue
@@ -238,25 +262,22 @@ def grade_task3(payload: Dict[str, Any]) -> Tuple[float, str]:
             av = agent_rec.get(f)
             gv = gold_rec[f]
             try:
-                if isinstance(gv, int):
-                    match = int(av) == gv
-                else:
-                    match = str(av).strip().lower() == str(gv).strip().lower()
+                match = int(av) == gv if isinstance(gv, int) else \
+                        str(av).strip().lower() == str(gv).strip().lower()
             except Exception:
                 match = False
             if match:
                 correct += 1
             else:
-                # Penalty: agent set null when gold is not null
                 if av is None and gv is not None:
                     penalties += 1
                 feedback_parts.append(f"✗ {eid}.{f} got={av!r} expected={gv!r}")
 
-    base_score = correct / total if total else 0.0
+    base_score        = correct / total if total else 0.0
     penalty_deduction = min(penalties * 0.05, 0.20)
-    score = round(max(0.0, base_score - penalty_deduction), 4)
+    score = _clamp(max(0.0, base_score - penalty_deduction))
     feedback = (
-        f"Task3 score={score:.2f} | field_accuracy={base_score:.2f} "
+        f"Task3 score={score:.2f} | accuracy={base_score:.2f} "
         f"[{correct}/{total}] | null_penalties={penalties} (-{penalty_deduction:.2f})\n"
         + "\n".join(feedback_parts[:10])
     )
@@ -275,10 +296,10 @@ TASKS = {
             "Apply: trim whitespace, lowercase category/brand, convert price→float, "
             "quantity→int, discount_pct→int, date→YYYY-MM-DD."
         ),
-        "input_data": TASK1_INPUT,
+        "input_data":  TASK1_INPUT,
         "schema_hint": TASK1_SCHEMA,
-        "grader": grade_task1,
-        "max_steps": 3,
+        "grader":      grade_task1,
+        "max_steps":   3,
     },
     2: {
         "name": "dedup-merge",
@@ -289,10 +310,10 @@ TASKS = {
             "  clusters: list of lists of record ids\n"
             "  merged:   list of canonical records (company, address, phone, email)"
         ),
-        "input_data": TASK2_RECORDS,
+        "input_data":  TASK2_RECORDS,
         "schema_hint": None,
-        "grader": grade_task2,
-        "max_steps": 5,
+        "grader":      grade_task2,
+        "max_steps":   5,
     },
     3: {
         "name": "multi-source-reconciliation",
@@ -302,9 +323,9 @@ TASKS = {
             "to produce a golden master record for each entity_id. "
             "Never set a field to null when a non-null value exists in any source."
         ),
-        "input_data": {**TASK3_SOURCES, "policy": TASK3_POLICY},
+        "input_data":  {**TASK3_SOURCES, "policy": TASK3_POLICY},
         "schema_hint": None,
-        "grader": grade_task3,
-        "max_steps": 6,
+        "grader":      grade_task3,
+        "max_steps":   6,
     },
 }

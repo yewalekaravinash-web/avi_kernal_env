@@ -50,7 +50,12 @@ app = create_app(
 #     response → Space stays in "Building" state indefinitely
 
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, PlainTextResponse
+
+try:
+    from server.metrics import MetricsCollector
+except ImportError:
+    from .metrics import MetricsCollector  # type: ignore[import]
 
 
 class HealthCheckMiddleware(BaseHTTPMiddleware):
@@ -74,6 +79,11 @@ class HealthCheckMiddleware(BaseHTTPMiddleware):
                 },
                 status_code=200,
             )
+
+        if path == "/metrics":
+            body, content_type = MetricsCollector.get().generate_text()
+            return PlainTextResponse(content=body, status_code=200,
+                                     media_type=content_type)
 
         return await call_next(request)
 

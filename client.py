@@ -36,7 +36,18 @@ class DataCleanerEnvClient(
             print(result.observation.step_feedback)
     """
 
-    def _step_payload(self, action: DataCleanerAction) -> Dict:
+    def _step_payload(self, action) -> Dict:
+        """
+        Build the wire payload for a step request.
+
+        Accepts both a DataCleanerAction object (normal path) and a plain dict
+        (fallback path used when inference.py cannot import the models).
+        Attribute access on a plain dict raises AttributeError, which causes
+        env_client.step() to throw, the exception handler in run_task to fire,
+        and every task to score 0.000 with steps=1. This guard prevents that.
+        """
+        if isinstance(action, dict):
+            return {"task_id": action.get("task_id"), "payload": action.get("payload", {})}
         return {"task_id": action.task_id, "payload": action.payload}
 
     def _parse_result(self, payload: Dict) -> StepResult[DataCleanerObservation]:

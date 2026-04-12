@@ -20,13 +20,24 @@ import textwrap
 import time
 from typing import Any, Dict, List, Optional
 
-from openai import OpenAI
+# FIX RC-3: `from openai import OpenAI` was a bare module-level import.
+# When openai is not installed the interpreter raises ImportError before
+# main() is ever reached, so no [START] or [END] lines are emitted and the
+# evaluator scores the run as 0.  Guard it here; main() re-checks _OPENAI_OK.
+try:
+    from openai import OpenAI
+    _OPENAI_OK = True
+    _OPENAI_ERR = ""
+except ImportError as _oa_err:
+    _OPENAI_OK = False
+    _OPENAI_ERR = str(_oa_err)
+    OpenAI = None  # type: ignore[assignment,misc]
 
 # ── openenv-core imports (correct public API — no submodule paths) ─────────────
 try:
     from openenv.core import EnvClient, SyncEnvClient                     # noqa: F401
     from openenv.core.client_types import StepResult
-    from openenv.core.env_server.types import Observation, Action
+    from openenv.core.env_server.types import Observation, Action, State
     _OPENENV_OK = True
 except ImportError as _oe_err:
     _OPENENV_OK = False
@@ -57,50 +68,32 @@ SERVER_RETRY_MAX  = 10         # attempts to wait for server readiness
 SERVER_RETRY_WAIT = 3.0        # seconds between retries
 
 
+# ── RL Trainer import ─────────────────────────────────────────────────────────
+try:
+    from rl_trainer import RLTrainer, TrainingConfig
+    _RL_OK = True
+except ImportError as _rl_err:
+    _RL_OK = False
+    _RL_ERR = str(_rl_err)
+
+# ── RL Configuration from environment ─────────────────────────────────────────
+RL_ENABLED      = os.getenv("RL_ENABLED",     "").lower() in ("1", "true", "yes")
+RL_NUM_CYCLES   = int(os.getenv("RL_NUM_CYCLES",   "2"))
+RL_GAMMA        = float(os.getenv("RL_GAMMA",       "0.99"))
+RL_BASELINE_LR  = float(os.getenv("RL_BASELINE_LR", "0.1"))
+RL_NUM_TASKS    = int(os.getenv("RL_NUM_TASKS",     "10"))
+
 # ════════════════════════════════════════════════════════════════════════════════
-# Concrete EnvClient — EnvClient is abstract; _step_payload + _parse_result
-# must be implemented before it can be instantiated.
+# P0-3: Import DataCleanerEnvClient from client.py — single canonical definition.
+# The duplicate class that previously lived here is removed to eliminate the
+# divergence risk between client.py and inference.py implementations.
 # ════════════════════════════════════════════════════════════════════════════════
-
-class DataCleanerEnvClient(EnvClient):
-    """Concrete client for the DataCleaner environment server."""
-
-    def _step_payload(self, action: Any) -> Dict[str, Any]:
-        """Serialize action → wire dict for the server."""
-        if isinstance(action, dict):
-            return action
-        # DataCleanerAction pydantic model
-        return {"task_id": action.task_id, "payload": action.payload}
-
-    def _parse_result(self, payload: Dict[str, Any]) -> "StepResult":
-        """Deserialize server response → StepResult[DataCleanerObservation]."""
-        obs_raw  = payload.get("observation", {})
-        done     = bool(payload.get("done", False))
-        reward   = payload.get("reward")
-
-        # Build observation — use the pydantic model when available,
-        # fall back to a plain namespace object so the rest of the script
-        # still works even if the model import failed.
-        if DataCleanerObservation is not None:
-            try:
-                obs = DataCleanerObservation(
-                    task_id         = obs_raw.get("task_id", 1),
-                    task_name       = obs_raw.get("task_name", ""),
-                    instruction     = obs_raw.get("instruction", ""),
-                    input_data      = obs_raw.get("input_data", {}),
-                    schema_hint     = obs_raw.get("schema_hint"),
-                    step_feedback   = obs_raw.get("step_feedback", ""),
-                    cumulative_score= float(obs_raw.get("cumulative_score", 0.0)),
-                    done            = done,
-                    reward          = reward,
-                    metadata        = obs_raw.get("metadata", {}),
-                )
-            except Exception:
-                obs = _SimpleNamespace(**obs_raw, done=done, reward=reward)
-        else:
-            obs = _SimpleNamespace(**obs_raw, done=done, reward=reward)
-
-        return StepResult(observation=obs, reward=reward, done=done)
+try:
+    from client import DataCleanerEnvClient  # type: ignore[import]
+except ImportError:
+    # openenv-core not installed — DataCleanerEnvClient will be None;
+    # main() guards on _OPENENV_OK before any instantiation attempt.
+    DataCleanerEnvClient = None  # type: ignore[assignment,misc]
 
 
 class _SimpleNamespace:
@@ -253,11 +246,24 @@ def run_task(llm_client: OpenAI, env_client, task_num: int) -> Dict[str, Any]:
 
             payload = call_llm(llm_client, obs_json)
 
-            action_data = {"task_id": task_id, "payload": payload}
+            # Build a typed action object — client._step_payload uses attribute
+            # access (.task_id / .payload), so a plain dict causes AttributeError
+            # → caught below → reward=0.0, score=0.0, done=True after step 1.
+            # Prefer DataCleanerAction (validates payload via Pydantic).
+            # Fall back to _SimpleNamespace when models cannot be imported.
+            if DataCleanerAction is not None:
+                try:
+                    _action = DataCleanerAction(task_id=task_id, payload=payload)
+                except Exception as _ae:
+                    print(f"[DEBUG] DataCleanerAction build error: {_ae}", flush=True)
+                    _action = _SimpleNamespace(task_id=task_id, payload=payload)
+            else:
+                _action = _SimpleNamespace(task_id=task_id, payload=payload)
+
             error: Optional[str] = None
 
             try:
-                result = env_client.step(action_data)
+                result = env_client.step(_action)
                 obs    = result.observation
                 reward = float(result.reward or 0.0)
                 done   = bool(result.done)
@@ -308,6 +314,12 @@ def main() -> None:
         log_end(success=False, steps=0, score=0.0, rewards=[])
         sys.exit(1)
 
+    # ── Guard: openai must be importable (RC-3) ───────────────────────────────
+    if not _OPENAI_OK:
+        print(f"[DEBUG] FATAL: openai not installed: {_OPENAI_ERR}", flush=True)
+        log_end(success=False, steps=0, score=0.0, rewards=[])
+        sys.exit(1)
+
     # ── Guard: HF_TOKEN warning ───────────────────────────────────────────────
     if not API_KEY:
         print(
@@ -344,18 +356,56 @@ def main() -> None:
     env_client = async_client.sync()
 
     all_scores: List[float] = []
-    try:
-        with env_client:                    # guarantees WebSocket cleanup
-            for task_num in range(1, 4):    # tasks 1, 2, 3
-                result = run_task(llm_client, env_client, task_num)
-                all_scores.append(result["score"])
-                print(
-                    f"[DEBUG] Task {task_num} ({result['task_name']}) "
-                    f"score: {result['score']:.3f}",
-                    flush=True,
-                )
-    except Exception as exc:
-        print(f"[DEBUG] main loop error: {exc}", flush=True)
+
+    # ── RL Training Mode ──────────────────────────────────────────────────────
+    if RL_ENABLED and _RL_OK:
+        print(
+            f"[DEBUG] RL Training Mode ENABLED: {RL_NUM_TASKS} tasks, "            f"{RL_NUM_CYCLES} cycles, gamma={RL_GAMMA}",
+            flush=True,
+        )
+        rl_config = TrainingConfig(
+            num_episodes    = RL_NUM_TASKS,
+            num_cycles      = RL_NUM_CYCLES,
+            gamma           = RL_GAMMA,
+            baseline_lr     = RL_BASELINE_LR,
+            verbose         = True,
+            log_file        = "rl_training.log",
+            success_threshold = SUCCESS_THRESHOLD,
+        )
+        trainer = RLTrainer(
+            llm_client = llm_client,
+            env_client = env_client,
+            config     = rl_config,
+            num_tasks  = RL_NUM_TASKS,
+        )
+        try:
+            rl_results = trainer.run()
+            summary    = rl_results["policy_summary"]
+            all_scores = list(summary.get("task_best", {}).values())
+            print(
+                f"[DEBUG] RL Training complete. "                f"Policy v{summary['weight_version']} | "                f"Global avg={summary['global_avg']:.3f}",
+                flush=True,
+            )
+            for tid, best in summary.get("task_best", {}).items():
+                print(f"[DEBUG] Task {tid} best score: {best:.3f}", flush=True)
+        except Exception as exc:
+            print(f"[DEBUG] RL Training error: {exc}", flush=True)
+    else:
+        # ── Standard Inference Mode (original 3-task loop) ────────────────
+        if RL_ENABLED and not _RL_OK:
+            print(f"[DEBUG] WARNING: RL requested but rl_trainer not importable: {_RL_ERR}", flush=True)
+        try:
+            with env_client:                    # guarantees WebSocket cleanup
+                for task_num in range(1, 4):    # tasks 1, 2, 3
+                    result = run_task(llm_client, env_client, task_num)
+                    all_scores.append(result["score"])
+                    print(
+                        f"[DEBUG] Task {task_num} ({result['task_name']}) "
+                        f"score: {result['score']:.3f}",
+                        flush=True,
+                    )
+        except Exception as exc:
+            print(f"[DEBUG] main loop error: {exc}", flush=True)
 
     avg = sum(all_scores) / len(all_scores) if all_scores else 0.0
     print(f"[DEBUG] Average score across {len(all_scores)} tasks: {avg:.3f}", flush=True)
