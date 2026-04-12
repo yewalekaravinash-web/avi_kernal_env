@@ -501,7 +501,7 @@ openenv push --repo-id <YOUR_HF_USERNAME>/avi_kernal_env
 `currency-normalization` `address-parsing` `rl-environment` `llm-judge`
 
 
-# Sample results not verfied
+# Sample results not verified
 
 The pipeline has successfully completed its second run! Here are the real-time results from the RL training Engine:
 
